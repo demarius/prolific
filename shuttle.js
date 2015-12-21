@@ -17,6 +17,7 @@ function Shuttle (process, log, interval) {
     process.on('uncaughtException', function (error) {
         logger.error('uncaught', { stack: error.stack })
         this.stop()
+        throw error
     }.bind(this))
     this._stderr = process.stderr
 }

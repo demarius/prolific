@@ -16,9 +16,6 @@ var interval = setInterval(function () {
 }, 1000)
 
 process.on('SIGINT', function () {
-    shuttle.stop()
-    shuttle.stop()
-    shuttle.stop()
     clearInterval(interval)
     console.log('called')
     throw new Error('uncaught')
