@@ -1,5 +1,6 @@
 var cadence = require('cadence')
 var fs = require('fs')
+var deepEqual = require('deep-equal')
 
 module.exports = cadence(function (async, filename, previous) {
     async([function () {
@@ -8,6 +9,10 @@ module.exports = cadence(function (async, filename, previous) {
         console.log(error.stack)
         return [ async.break, true ]
     }], function (current) {
-        return current !== previous
+        try {
+            return ! deepEqual(JSON.parse(current),  previous)
+        } catch (error) {
+            return false
+        }
     })
 })
