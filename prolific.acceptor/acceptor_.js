@@ -7,7 +7,7 @@ function Acceptor (accept, chain) {
     this._append(chain)
 }
 
-Acceptor.prototype._chain = function (path, level) {
+Acceptor.prototype._chain = function (path) {
     var i = 0
     var node = this._root
     var chain = []
@@ -16,11 +16,7 @@ Acceptor.prototype._chain = function (path, level) {
         if (child == null) {
             break
         }
-        for (var j = 0, link; (link = child['.links'][j]) != null; j++) {
-            if (link.level == null || level <= LEVEL[link.level]) {
-                chain.push(link)
-            }
-        }
+        Array.prototype.push.apply(chain, child['.links'])
         node = child
         i++
     }
@@ -49,40 +45,44 @@ Acceptor.prototype._createContext = function (path, level, properties) {
 Acceptor.prototype._test = function (chain, context) {
     for (;;) {
         var link = chain.pop()
-        if (link.test == null) {
-            return !! link.accept
-        } else if (link.test(context)) {
-            return true
+        if (link.level == null || context.level <= LEVEL[link.level]) {
+            if (link.test == null) {
+                return !! link.accept
+            } else if (link.test(context)) {
+                return true
+            }
         }
     }
 }
 
 Acceptor.prototype.acceptByProperties = function (properties) {
     var path = ('.' + properties[0].qualifier + '.').split('.')
+    var chain = this._chain(path)
     var level = LEVEL[properties[0].level]
-    var chain = this._chain(path, level)
     for (;;) {
         var link = chain.pop()
-        if (link.test == null) {
-            if (! link.accept) {
+        if (link.level == null || level <= LEVEL[link.level]) {
+            if (link.test == null) {
+                if (! link.accept) {
+                    return null
+                }
+                return this._createContext(path, level, properties)
+            } else {
+                var context = this._createContext(path, level, properties)
+                if (link.test(context)) {
+                    return context
+                }
+                if (this._test(chain, context)) {
+                    return context
+                }
                 return null
             }
-            return this._createContext(path, level, properties)
-        } else {
-            var context = this._createContext(path, level, properties)
-            if (link.test(context)) {
-                return context
-            }
-            if (this._test(chain, context)) {
-                return context
-            }
-            return null
         }
     }
 }
 
 Acceptor.prototype.acceptByContext = function (context) {
-    return this._test(this._chain(context.path, context.level), context)
+    return this._test(this._chain(context.path), context)
 }
 
 Acceptor.prototype._append = function (chain) {
