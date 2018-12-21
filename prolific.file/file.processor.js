@@ -1,15 +1,19 @@
 var fs = require('fs')
 var stream = require('stream')
 
+var Staccato = require('staccato')
+
+var coalesce = require('extant')
+
 var abend = require('abend')
 var cadence = require('cadence')
 var Signal = require('signal')
 var delta = require('delta')
 
-var stringify = require('prolific.stringify')
-var Sender = require('prolific.sender.stream')
+var restrictor = require('restrictor')
 
-function Processor (parameters, next) {
+function Processor (options) {
+    this._rotate = coalesce(options.rotate, Infinity)
     this._nullSender = {
         sent: Infinity,
         process: function (entry) { this.lines.push(stringify(entry)) },
@@ -18,6 +22,7 @@ function Processor (parameters, next) {
         lines: [],
         rotating: true
     }
+    this._writable = { end: function (callback) { callback() } }
     this._next = next
     this._filename = parameters.file
     this._rotateSize = parameters.rotate || 1024 * 1024 * 1024
@@ -29,25 +34,38 @@ function Processor (parameters, next) {
 
 Processor.prototype.open = function (callback) { callback() }
 
+Processor.prototype._open = cadence(function (async) {
+})
+
+Processor.prototype.send = restrictor.push(cadence(function (async, line) {
+    async(function () {
+        if (this._written >= this._rotate) {
+            this._rotate(async())
+        }
+    }, function () {
+        this._writable.wriate(line, async())
+    })
+}))
+
+Processor.prototype._close = function () {
+    this.destroyed = true
+}
+
 Processor.prototype._rotate = cadence(function (async) {
-    this._sender = this._nullSender
-    this._sender.sent = 0
-    this._rotating.open = null
     var stream
     async(function () {
-        this._flush(async())
+        this._writable.end(async())
     }, function () {
+        this._written = 0
         var stamp = new Date(this._Date.now())
             .toISOString()
             .replace(/[T.:]/g, '-')
             .replace(/-\d{2}-\d{3}Z$/, '')
         var filename = [ this._filename, stamp, this._pid ].join('-')
-        stream = fs.createWriteStream(filename, { flags: 'a' })
+        var stream = fs.createWriteStream(filename, { flags: 'a' })
         delta(async()).ee(stream).on('open')
     }, function () {
-        this._sender = new Sender(stream)
-        this._sender.splice(this._nullSender.lines)
-        this._rotating.open = []
+        this._writable = new Straccato.Writable(stream)
         this._rotating.notify()
     })
 })
@@ -77,4 +95,6 @@ Processor.prototype.close = cadence(function (async) {
     })
 })
 
-module.exports = Processor
+module.exports = cadence(function (async, destructible, options) {
+    return new Processor(options)
+})

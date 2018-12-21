@@ -1,6 +1,27 @@
-require('proof')(1, require('cadence')(prove))
+require('proof')(1, prove)
 
-function prove (async, okay) {
+function prove (okay, callback) {
+    var Destructible = require('destructible')
+    var destructible = new Destructible('t/file.t')
+
+    destructible.completed.wait(callback)
+
+    var cadence = require('cadence')
+
+    var path = require('path')
+
+    var File = require('..')
+
+    var file = path.join(__dirname, 'log')
+
+    cadence(function (async) {
+        async(function () {
+            destructible.durable('file', File, { file: file }, async())
+        }, function () {
+        })
+    })(destructible.durable('test'))
+    return
+
     var path = require('path')
     var fs = require('fs')
     var file = path.join(__dirname, 'log')
@@ -14,7 +35,7 @@ function prove (async, okay) {
     })
     var resolved = path.join(__dirname, 'log-1970-01-01-00-00-0')
     async([function () {
-        async.forEach(function (file) {
+       async.forEach(function (file) {
             async([function () {
                 fs.unlink(file, async())
             }, /^ENOENT$/, function () {
