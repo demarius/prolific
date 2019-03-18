@@ -9,13 +9,13 @@ module.exports = function (completed) {
             readable.read(async())
         }, function (chunk) {
             if (chunk == null) {
+                console.log('STDIN CLOSED', process.pid)
+                consumer.exit()
                 return [ async.break ]
             }
             var json = JSON.parse(chunk.toString())
+            console.log('MONITOR STDIN', process.pid, consumer.exited, json)
             consumer.push(json)
-            if (json.eos) {
-                completed()
-            }
         })
     })
 }

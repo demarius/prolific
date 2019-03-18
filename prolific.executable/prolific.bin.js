@@ -65,7 +65,7 @@ require('arguable')(module, function (program, callback) {
 
     process.env.PROLIFIC_SUPERVISOR_PROCESS_ID = program.pid
 
-    var destructible = new Destructible(7000, 'prolific')
+    var destructible = new Destructible(30000, 'prolific')
     program.on('shutdown', destructible.destroy.bind(destructible))
 
     descendent.increment()
@@ -99,6 +99,7 @@ require('arguable')(module, function (program, callback) {
 
         synchronous.setConsumer(json.streamId, {
             consume: function (chunk, callback) {
+                console.log('CHUNK', json, chunk)
                 monitor.stdin.write(JSON.stringify(chunk) + '\n', callback)
             }
         })
@@ -128,6 +129,7 @@ require('arguable')(module, function (program, callback) {
             var json = JSON.parse(chunk.buffer.toString())
             var path = [ process.pid ].concat(json.path)
             tree.processes(path).forEach(function (pid) {
+                console.log('CLOSING STDIN FOR', pid)
                 var monitor = monitors[pid]
                 monitor.stdin.end()
                 delete monitors[pid]

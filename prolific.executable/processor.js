@@ -208,6 +208,8 @@ Processor.prototype.process = cadence(function (async, envelope) {
                 this.updated(entries.shift()[0].version, async())
             }
         })
+    } else {
+        console.log('CANCELED', envelope)
     }
 })
 

@@ -28,7 +28,7 @@ require('arguable')(module, function (program, callback) {
 
     var descendent = require('foremost')('descendent')
 
-    var destructible = new Destructible(4000, 'prolific.monitor')
+    var destructible = new Destructible(25000, 'prolific.monitor')
     program.on('shutdown', destructible.destroy.bind(destructible))
 
     descendent.process = program
@@ -70,6 +70,12 @@ require('arguable')(module, function (program, callback) {
             turnstile.listen(destructible.durable('turnstile'))
             destructible.destruct.wait(turnstile, 'destroy')
 
+            destructible.destruct.wait(function () {
+                Error.stackTraceLimit = Infinity
+                console.log('DESTRUCT', process.pid)
+                console.log(new Error().stack)
+            })
+
             // Create our asynchronous listener that reads directly from the
             // monitored process.
             var asynchronous = new Asynchronous(queue)
@@ -77,13 +83,13 @@ require('arguable')(module, function (program, callback) {
             // Copy any final messages written to standard error into the
             // asynchronous listener so it can eliminate any duplicates that
             // where already written to our primary asynchronous pipe.
-            reader(program.stdin, asynchronous, destructible.durable('stdin'))
+            reader(program.stdin, asynchronous, destructible.ephemeral('stdin'))
             program.stdin.resume()
 
             // Listen to our asynchronous pipe.
             var socket = new program.attributes.net.Socket({ fd: 3 })
             destructible.destruct.wait(socket, 'destroy')
-            asynchronous.listen(socket, destructible.durable('asynchronous'))
+            asynchronous.listen(socket, destructible.ephemeral('asynchronous'))
             destructible.destruct.wait(asynchronous, 'exit')
 
             // Let the supervisor know that we're ready. It will send our

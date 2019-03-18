@@ -91,6 +91,10 @@ Shuttle.prototype._listen = function (descendent, options) {
         queue.push([{ version: message.body.version }])
     })
 
+    descendent.process.once('exit', function () {
+        queue.push([{ exit: true }])
+    })
+
     var chunks = []
     chunks.push(new Chunk(headerId, 0, Buffer.from(''), 1))
     var buffer = Buffer.from(JSON.stringify({
