@@ -1,17 +1,22 @@
+var assert = require('assert')
+
 var cadence = require('cadence')
-var abend = require('abend')
+var Signal = require('signal')
 
 var Chunk = require('prolific.chunk')
 
-function Queue (id, stderr, size) {
+function Queue (size, id, stderr) {
     this._id = id
-    this._size = Chunk.getBodySize(id)
+    this._size = Chunk.getBodySize(size, id)
     this._series = 1
-    this._buffers = []
+    this._signal = new Signal
+    this._entries = []
     this._batches = []
     this._checksum = 0xaaaaaaaa
+    var self = this
     this._stream = { end: function () {} }
     this._writing = true
+    this._piped = false
     this._sync = false
     this._exited = false
     this._stderr = stderr
@@ -46,7 +51,13 @@ Queue.prototype.setPipe = function (stream) {
         stream.end()
     } else {
         this._stream = stream
-        this._sendAsync(abend)
+        this._piped = true
+        if (this._entries.length) {
+            this._batchEntries()
+            this._signal.notify()
+        } else {
+            this._writing = false
+        }
     }
 }
 
@@ -55,10 +66,10 @@ Queue.prototype._batchEntries = function () {
     if (entries.length == 0) {
         return
     }
-    this.entries = []
+    this._entries = []
     this._batches.push({
         series: this._series++,
-        buffer: Buffer.from(JSON.stringify(entries) + '\n'))
+        buffer: Buffer.from(JSON.stringify(entries) + '\n')
     })
 }
 
@@ -69,7 +80,8 @@ Queue.prototype.push = function (json) {
         this._sendSync()
     } else if (!this._writing) {
         this._writing = true
-        this._sendAsync(abend)
+        this._batchEntries()
+        this._signal.notify()
     }
 }
 
@@ -78,25 +90,32 @@ Queue.prototype.push = function (json) {
 // checks to see if the pipe has ended and breaks early, otherwise it continues
 // until there are no lines or chunks to _sendAsync.
 
+// Note that the first time through we're going to not have any entries and
+// wait but we don't want to mark ourselves as not writing because we want to
+// keep `push` from signalling us until we get the pipe.
+
+// So, first time through we don't mean it.
+
 //
-Queue.prototype._sendAsync = cadence(function (async) {
+Queue.prototype.send = cadence(function (async) {
     async.loop([], function () {
-        if (this._batches.length == 0) {
-            this._batchEntries()
-            if (this._batches.length == 0) {
-                this._writing = false
-                return [ async.break ]
-            }
-        }
-        var chunk = this._batches[0]
         async(function () {
-            this._stream.write(chunk.concat(this._previous.async), async())
+            if (this._entries.length == 0) {
+                this._writing = ! this._piped
+                this._signal.wait(async())
+            } else {
+                this._batchEntries()
+            }
         }, function () {
             if (this._sync) {
                 return [ async.break ]
             }
-            this._checksum.async = chunk.checksum
-            this._batches.shift()
+            assert(this._batches.length == 1)
+            async(function () {
+                this._stream.write(this._batches[0].buffer, async())
+            }, function () {
+                this._batches.shift()
+            })
         })
     })
 })
@@ -162,7 +181,7 @@ Queue.prototype.close = function () {
     }
 
     this._sync = true
-    this._writing = true
+    this._signal.unlatch()
     this._stream.end()
 
     this._batchEntries()
@@ -232,7 +251,7 @@ Queue.prototype.exit = function () {
         this.close()
         this._batchEntries()
         this._sendSync()
-        this._writeSync(new Chunk(true, this._id, JSON.stringify({ method: 'exit' })))
+        this._writeSync(new Chunk(true, this._id, Buffer.from(JSON.stringify({ method: 'exit' }))))
         this._exited = true
     }
 }
