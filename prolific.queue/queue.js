@@ -1,24 +1,48 @@
-var abend = require('abend')
 var cadence = require('cadence')
-var Chunk = require('prolific.chunk')
-var stream = require('stream')
+var abend = require('abend')
 
-function Queue (streamId, stderr) {
-    this._streamId = streamId
+var Chunk = require('prolific.chunk')
+
+function Queue (id, stderr, size) {
+    this._id = id
+    this._size = Chunk.getBodySize(id)
+    this._series = 1
     this._buffers = []
-    this._chunks = []
-    this._chunkNumber = 1
-    this._previousChecksum = 'aaaaaaaa'
-    this._stream = new stream.PassThrough // for an `end`
-    this._terminated = false
+    this._batches = []
+    this._checksum = 0xaaaaaaaa
+    this._stream = { end: function () {} }
     this._writing = true
-    this._closed = false
+    this._sync = false
+    this._exited = false
     this._stderr = stderr
-    this._chunks.push(new Chunk(this._streamId, 0, Buffer.from(''), 1))
 }
 
+Queue.prototype._writeSync = function (chunk) {
+    this._stderr.write(chunk.concat(this._checksum))
+    this._checksum = chunk.checksum
+}
+
+// Announce the child process to the supervisor. This will inform the supervisor
+// that this child exists and that it may at some point send messages through
+// chunks on standard error. Call this early in your program.
+
+//
+Queue.prototype.announce = function (announcement) {
+    this._writeSync(new Chunk(true, this._id, Buffer.from(JSON.stringify({
+        method: 'announce',
+        body: announcement
+    }))))
+}
+
+// TODO Optional callback so that Prolific can log it's own failure if the
+// asynchronous pipe raises and exception.
+
+// Set the asynchronous pipe and begin streaming entries or else close the pipe
+// if it has arrived after we've closed.
+
+//
 Queue.prototype.setPipe = function (stream) {
-    if (this._closed) {
+    if (this._sync) {
         stream.end()
     } else {
         this._stream = stream
@@ -26,26 +50,27 @@ Queue.prototype.setPipe = function (stream) {
     }
 }
 
+Queue.prototype._batchEntries = function () {
+    var entries = this._entries
+    if (entries.length == 0) {
+        return
+    }
+    this.entries = []
+    this._batches.push({
+        series: this._series++,
+        buffer: Buffer.from(JSON.stringify(entries) + '\n'))
+    })
+}
+
 Queue.prototype.push = function (json) {
-    this._buffers.push(Buffer.from(JSON.stringify(json) + '\n'))
-    if (this._closed) {
-        this._chunkEntries()
+    this._entries.push(json)
+    if (this._sync) {
+        this._batchEntries()
         this._sendSync()
     } else if (!this._writing) {
         this._writing = true
         this._sendAsync(abend)
     }
-}
-
-Queue.prototype._chunkEntries = function () {
-    var buffers = this._buffers
-    if (buffers.length == 0) {
-        return
-    }
-    this._buffers = []
-
-    var buffer = Buffer.concat(buffers)
-    this._chunks.push(new Chunk(this._streamId, this._chunkNumber++, buffer, buffer.length))
 }
 
 // Flush logs to the dedicated logging pipe. Chunks entries so that we can send
@@ -56,74 +81,91 @@ Queue.prototype._chunkEntries = function () {
 //
 Queue.prototype._sendAsync = cadence(function (async) {
     async.loop([], function () {
-        if (this._chunks.length == 0) {
-            this._chunkEntries()
-            if (this._chunks.length == 0) {
+        if (this._batches.length == 0) {
+            this._batchEntries()
+            if (this._batches.length == 0) {
                 this._writing = false
                 return [ async.break ]
             }
         }
-        var chunk = this._chunks[0]
+        var chunk = this._batches[0]
         async(function () {
-            this._stream.write(Buffer.concat([
-                chunk.header(this._previousChecksum), chunk.buffer
-            ]), async())
+            this._stream.write(chunk.concat(this._previous.async), async())
         }, function () {
-            if (this._closed) {
+            if (this._sync) {
                 return [ async.break ]
             }
-            this._previousChecksum = chunk.checksum
-            this._chunks.shift()
+            this._checksum.async = chunk.checksum
+            this._batches.shift()
         })
     })
 })
 
-// Necessary for uncaught exception when the default shutdown hooks in Node.js
-// are disabled by a `SIGTERM` handler. My test to assert that we'd shutdown
-// normally passed because the only hook was the async pipe between the parent
-// and child. That is closed by `exit`. Anything else is going to keep the
-// socket open, so you need to exit explicitly. If you exit immediately after
-// write, then you will not flush STDERR.
+// Prolific has wrestled long and hard with the confusing available Node.js
+// events for program shutdown. It was born of a desire to capture the fatal
+// stack trace from a Node.js process and send it to a networked logging
+// infrastructure. It was born from a frustration with the brutal performance of
+// the "best practice" logging to standard out when standard out is synchronous
+// in Node.js. We want to log somewhere asynchronously when times are good for
+// performance, but we want to log somewhere synchronously when times are bad
+// because there might not be another tick available to talk to the network.
+
+// The "uncaughtException" handler is a final handler, or it should be. You
+// should do something synchronous then rethrow the error. This is where
+// Prolific began. Writing that error to standard error in such a way that a
+// monitor could forward it to the network.
+
+// It seemed then that the "exit" handler was the place to handle ordinary exit,
+// and that hooking the "exit" handler would be a way to allow Prolific to
+// shutdown normally by writing it's shutdown messages to standard error.
+
+// However, default handlers for `SIGTERM` and `SIGINT` do not invoke `"exit"`.
+// `"exit"` is really a work-queue-had-drained event, not an exit event.
+// `SIGTERM` and `SIGINT` halt the program without working through the work
+// queue. This came as a surprise. It's something that I forget about until I
+// return to work on Prolific and wonder how it ever became so complicated.
+
+// This caused me to create a lot of options and to find ways to determine the
+// exit of a child process from the monitor.
+
+// However, in the sort of network programming where I want to log to a
+// networked logger I always hook `SIGTERM` and `SIGINT` and endeavor to unwind
+// my work queue myself. If I can't unwind the work queue, I throw an exception.
+// This means I'm always going to reach either `"uncaughtExcpetion"` or
+// `"exit"`.
+
+// This initial confusion about `"exit"` lead me to hedge against other
+// behaviors that might surprise me. Time has passed and here's what I figure.
+
+// If you need really robust multi-process logging, then defeat those signal
+// handlers and unwind your program. If it can't unwind then that is an
+// exception. I have a library called Destructible that throws an uncatchable
+// exception with an elaborate stack trace that shows which operations blocked
+// exit.
+
+// If you really want a quick and dirty client I can probably detect that you're
+// done from the supervisor when your child exits, so long as you're not having
+// children wink in and out of existence. But that's unlikely for a program like
+// a command line utlity where you might want to have Node.js just scram your
+// work queue when you exit.
+
 //
-// Put this note somewhere where you'll not delete it.
-//
-// The `close` method closes the asynchronous logging pipe to the monitor. We
-// continue to log each line to `STDERR` for the remainder of the program's
-// execution.
-//
-// In order to get every last logging message, the user needs to disable default
-// signal handling because the default signal handler for `SIGTERM` will close
-// the asynchronous pipe abruptly so that messages waiting to go out the
-// asynchronous pipe will be lost. The default signal handlers will prevent an
-// `process` from emitting and `"exit"` event. Thus, a `SIGTERM` signal handler
-// should close the Prolific Queue so that any waiting messages can be sent
-// synchronously via `STDERR`.
-//
-// This can also be done to capture an `uncaughtException`. Register an
-// `uncaughtException` handler that closes the queue, logs the exception, then
-// rethrows the exception. Because the log entry is written after queue is
-// closed, the uncaught exception log entry will be send synchronously.
+
+// Close the asynchronous pipe and log chunks to standard error. This needs to
+// be called in response to `SIGTERM` or else the asynchronous pipe will keep
+// the program from exiting.
 
 //
 Queue.prototype.close = function () {
-    if (this._closed) {
+    if (this._sync) {
         return
     }
 
-    this._closed = true
+    this._sync = true
     this._writing = true
     this._stream.end()
 
-    this._chunkEntries()
-
-    if (this._chunks.length == 0) {
-        this._chunks.unshift(new Chunk(this._streamId, 0, Buffer.from(''), this._chunkNumber))
-        this._previousChecksum = 'aaaaaaaa'
-    } else if (this._chunks.length > 0 && this._chunks[0].number != 0) {
-        this._chunks.unshift(new Chunk(this._streamId, 0, Buffer.from(''), this._chunks[0].number))
-        this._previousChecksum = 'aaaaaaaa'
-    }
-
+    this._batchEntries()
     this._sendSync()
 }
 
@@ -145,16 +187,54 @@ Queue.prototype.close = function () {
 // That is, I'd looked for a utility then realized that finding the start of a
 // Unicode character is trivial.
 
+// Send a group of entries inside chunks on standard error. We need to split the
+// entires JSON up into chunks that will fit in `PIPE_BUF` sized buffers so that
+// our writes to standard error are atomic and our chunks are not broken up by
+// the output of other processes.
+
+// For each entries array JSON we first write a control chunk that contains a
+// checksum of the JSON and a count of subsequent body content chunks that will
+// contain the JSON. We then write out the body content chunks.
+
+// There's some description of the chunk format in the `chunk.js` file in the
+// `prolific.chunk` project.
+
 //
 Queue.prototype._sendSync = function () {
-    var buffers = []
-    while (this._chunks.length) {
-        var chunk = this._chunks.shift()
-        buffers.push(chunk.header(this._previousChecksum), chunk.buffer)
-        this._previousChecksum = chunk.checksum
+    if (!this._exited) {
+        return
     }
-    console.log('SENDING SYNC', Buffer.concat(buffers).toString())
-    this._stderr.write(Buffer.concat(buffers))
+    var buffers = []
+    while (this._batches.length) {
+        var batch = this._batches.shift()
+        var buffer = batch.buffer.slice(0, buffer.length - 1)
+        var chunks = []
+        var begin = 0
+        while (begin < buffer.length) {
+            var end = split(buffer, begin + Math.min(this._size, buffer.length - begin))
+            chunks.push(new Chunk(false, this._id, buffer.slice(begin, end)))
+            begin = end
+        }
+        this._writeSync(new Chunk(true, this._id, Buffer.from({
+            method: 'chunk',
+            checksum: fnv(0, buffer, 0, buffer.length),
+            chunks: chunks.length
+        })))
+        chunks.forEach(function (chunk) { this._writeSync(chunk) }, this)
+    }
+}
+
+// If you can tell the supervior that you are leaving, that would be very nice.
+
+//
+Queue.prototype.exit = function () {
+    if (!this._exited) {
+        this.close()
+        this._batchEntries()
+        this._sendSync()
+        this._writeSync(new Chunk(true, this._id, JSON.stringify({ method: 'exit' })))
+        this._exited = true
+    }
 }
 
 module.exports = Queue
