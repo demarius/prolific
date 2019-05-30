@@ -1,3 +1,8 @@
+describe('processor', () => {
+    const assert = require('assert')
+    const Processor = require('../processor')
+})
+return
 require('proof')(5, prove)
 
 function prove (okay, callback) {
